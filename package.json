@@ -24,9 +24,6 @@
 		"worker/*.py",
 		"worker/*.cfg"
 	],
-	"os": [
-		"!win32"
-	],
 	"engines": {
 		"node": ">=16"
 	},
