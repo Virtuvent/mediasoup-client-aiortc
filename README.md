@@ -8,8 +8,8 @@
 
 ## Requirements
 
-- Python 3.
-- Windows not supported.
+- Python >= 3.10.
+- Windows is not supported.
 
 ## Installation
 
@@ -22,13 +22,13 @@ npm install mediasoup-client-aiortc
 The "postinstall" script in `package.json` will install the Python libraries (including **aiortc**). You can override the path to `python` executable by setting the `PYTHON` environment variable:
 
 ```bash
-PYTHON=/home/me/bin/python3.13 npm install mediasoup-client-aiortc
+PYTHON=/PATH_TO/python3.14 npm install mediasoup-client-aiortc
 ```
 
-Same once you run your Node.js application. **mediasoup-client-aiortc** will spawn Python processes and communicate with them via `UnixSocket`. You can override the `python` executable path by setting the `PYTHON` environment variable:
+Same thing once you run your Node.js application. **mediasoup-client-aiortc** will spawn Python processes and communicate with them via `UnixSocket`. You can override the `python` executable path by setting the `PYTHON` environment variable:
 
 ```bash
-PYTHON=/home/me/bin/python3.13 node my_app.js
+PYTHON=/PATH_TO/python3.14 node my_app.js
 ```
 
 ## API
@@ -234,7 +234,6 @@ Mandatory if `source` is "url". Must be the URL of an HTTP stream.
 Specifies the device format used by `ffmpeg`.
 
 - Default values for `Darwin` platform:
-
   - "avfoundation" for audio.
   - "avfoundation" for video.
 
@@ -247,7 +246,6 @@ Specifies the device format used by `ffmpeg`.
 Specifies the device options used by `ffmpeg`.
 
 - Default values for `Darwin` platform:
-
   - `{}` for audio.
   - `{ framerate: "30", video_size: "640x480" }` for video.
 
@@ -309,6 +307,6 @@ See the list of [open issues](https://github.com/versatica/mediasoup-client-aior
 [npm-shield-mediasoup-client-aiortc]: https://img.shields.io/npm/v/mediasoup-client-aiortc.svg
 [npm-mediasoup-client-aiortc]: https://npmjs.org/package/mediasoup-client-aiortc
 [github-actions-shield-mediasoup-client-aiortc]: https://github.com/versatica/mediasoup-client-aiortc/actions/workflows/mediasoup-client-aiortc.yaml/badge.svg
-[github-actions-mediasoup-client-aiortc]: https://github.com/versatica/mediasoup-client-aiortc/actions/workflows/mediasoup-client.yaml
+[github-actions-mediasoup-client-aiortc]: https://github.com/versatica/mediasoup-client-aiortc/actions/workflows/mediasoup-client-aiortc.yaml
 [opencollective-shield-mediasoup]: https://img.shields.io/opencollective/all/mediasoup.svg
 [opencollective-mediasoup]: https://opencollective.com/mediasoup/

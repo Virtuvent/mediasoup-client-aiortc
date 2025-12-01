@@ -1,9 +1,9 @@
-import os from 'node:os';
-import { v4 as uuidv4 } from 'uuid';
+import * as os from 'node:os';
+import { v4 as uuidv4 } from '@lukeed/uuid/secure';
 import { FakeMediaStreamTrack } from 'fake-mediastreamtrack';
-import { clone } from 'mediasoup-client/lib/utils';
 import { Channel } from './Channel';
-import { AiortcMediaStream } from './AiortcMediaStream';
+import { AiortcMediaStream, AiortcMediaStreamTrack } from './AiortcMediaStream';
+import { clone } from './utils';
 
 export type AiortcMediaStreamConstraints = {
 	audio?: AiortcMediaTrackConstraints | boolean;
@@ -42,14 +42,14 @@ export async function getUserMedia(
 	channel: Channel,
 	constraints: AiortcMediaStreamConstraints = {}
 ): Promise<AiortcMediaStream> {
-	constraints = clone(constraints) as AiortcMediaStreamConstraints;
+	constraints = clone<AiortcMediaStreamConstraints>(constraints);
 
 	let { audio, video } = constraints;
 	let audioPlayerInternal: MediaPlayerInternal | undefined;
 	let videoPlayerInternal: MediaPlayerInternal | undefined;
 	let audioPlayerOptions: MediaPlayerOptions | undefined;
 	let videoPlayerOptions: MediaPlayerOptions | undefined;
-	const tracks: FakeMediaStreamTrack[] = [];
+	const tracks: AiortcMediaStreamTrack[] = [];
 
 	if (!audio && !video) {
 		throw new TypeError('at least audio or video constraints must be given');
@@ -66,9 +66,10 @@ export async function getUserMedia(
 			case 'device': {
 				audioPlayerOptions = {
 					source: 'device',
-					file: audio.device ?? os.platform() === 'darwin' ? 'none:0' : 'hw:0',
+					file:
+						(audio.device ?? os.platform() === 'darwin') ? 'none:0' : 'hw:0',
 					format:
-						audio.format ?? os.platform() === 'darwin'
+						(audio.format ?? os.platform() === 'darwin')
 							? 'avfoundation'
 							: 'alsa',
 					options: audio.options,
@@ -134,14 +135,13 @@ export async function getUserMedia(
 				videoPlayerOptions = {
 					source: 'device',
 					file:
-						video.device ?? os.platform() === 'darwin'
+						(video.device ?? os.platform() === 'darwin')
 							? 'default:none'
 							: '/dev/video0',
 					format:
-						video.format ?? os.platform() === 'darwin'
+						(video.format ?? os.platform() === 'darwin')
 							? 'avfoundation'
 							: 'v4l2',
-					// eslint-disable-next-line camelcase
 					options: video.options ?? { framerate: '30', video_size: '640x480' },
 					timeout: video.timeout,
 					loop: video.loop,
@@ -254,13 +254,13 @@ export async function getUserMedia(
 	}
 
 	if (audioPlayerInternal) {
-		const track = new FakeMediaStreamTrack({
+		const track: AiortcMediaStreamTrack = new FakeMediaStreamTrack({
 			id: audioPlayerInternal.audioTrackId,
 			kind: 'audio',
-			data: { playerId: audioPlayerInternal.playerId },
+			data: { playerId: audioPlayerInternal.playerId, remote: false },
 		});
 
-		track.addEventListener('@stop', () => {
+		track.addEventListener('stopped', () => {
 			channel.notify('player.stopTrack', audioPlayerInternal, {
 				kind: 'audio',
 			});
@@ -270,13 +270,13 @@ export async function getUserMedia(
 	}
 
 	if (videoPlayerInternal) {
-		const track = new FakeMediaStreamTrack({
+		const track: AiortcMediaStreamTrack = new FakeMediaStreamTrack({
 			id: videoPlayerInternal.videoTrackId,
 			kind: 'video',
-			data: { playerId: videoPlayerInternal.playerId },
+			data: { playerId: videoPlayerInternal.playerId, remote: false },
 		});
 
-		track.addEventListener('@stop', () => {
+		track.addEventListener('stopped', () => {
 			channel.notify('player.stopTrack', videoPlayerInternal, {
 				kind: 'video',
 			});
@@ -287,7 +287,7 @@ export async function getUserMedia(
 
 	const stream = new AiortcMediaStream(tracks);
 
-	stream.addEventListener('@close', () => {
+	stream.addEventListener('close', () => {
 		if (audioPlayerInternal) {
 			channel.notify('player.close', audioPlayerInternal);
 		}

@@ -1,7 +1,7 @@
 import { Device, types as mediasoupClientTypes } from 'mediasoup-client';
-import { FakeMediaStreamTrack } from 'fake-mediastreamtrack';
 import { createWorker } from '../';
 import { Worker } from '../Worker';
+import { AiortcMediaStreamTrack } from '../AiortcMediaStream';
 import * as fakeParameters from './fakeParameters';
 
 type TestContext = {
@@ -57,7 +57,7 @@ beforeEach(async () => {
 
 	ctx.connectedSendTransport.on(
 		'produce',
-		// eslint-disable-next-line no-shadow, @typescript-eslint/no-unused-vars
+		// eslint-disable-next-line @typescript-eslint/no-unused-vars
 		({ kind, rtpParameters, appData }, callback /* errback */) => {
 			// eslint-disable-next-line no-shadow
 			const { id } = fakeParameters.generateProducerRemoteParameters();
@@ -168,8 +168,8 @@ test(
 			audio: { source: 'file', file: 'src/test/data/small.mp4' },
 			video: { source: 'file', file: 'src/test/data/small.mp4' },
 		});
-		const audioTrack = stream.getTracks()[0];
-		const videoTrack = stream.getTracks()[1];
+		const audioTrack = stream.getTracks()[0]!;
+		const videoTrack = stream.getTracks()[1]!;
 
 		await expect(worker.dump()).resolves.toEqual({
 			pid: worker.pid,
@@ -311,8 +311,8 @@ test(
 			audio: { source: 'file', file: 'src/test/data/small.mp4' },
 			video: { source: 'file', file: 'src/test/data/small.mp4' },
 		});
-		const audioTrack = stream.getTracks()[0];
-		const videoTrack = stream.getTracks()[1];
+		const audioTrack = stream.getTracks()[0]!;
+		const videoTrack = stream.getTracks()[1]!;
 		let connectEventNumTimesCalled = 0;
 		let produceEventNumTimesCalled = 0;
 
@@ -355,15 +355,15 @@ test(
 		codecs = audioProducer.rtpParameters.codecs;
 
 		expect(codecs.length).toBe(1);
-		expect(codecs[0].mimeType).toBe('audio/opus');
+		expect(codecs[0]!.mimeType).toBe('audio/opus');
 
 		headerExtensions = audioProducer.rtpParameters.headerExtensions;
 
 		expect(headerExtensions!.length).toBe(2);
-		expect(headerExtensions![0].uri).toBe(
+		expect(headerExtensions![0]!.uri).toBe(
 			'urn:ietf:params:rtp-hdrext:ssrc-audio-level'
 		);
-		expect(headerExtensions![1].uri).toBe(
+		expect(headerExtensions![1]!.uri).toBe(
 			'urn:ietf:params:rtp-hdrext:sdes:mid'
 		);
 
@@ -371,9 +371,9 @@ test(
 
 		expect(Array.isArray(encodings)).toBe(true);
 		expect(encodings!.length).toBe(1);
-		expect(typeof encodings![0]).toBe('object');
-		expect(Object.keys(encodings![0])).toEqual(['ssrc', 'dtx']);
-		expect(typeof encodings![0].ssrc).toBe('number');
+		expect(typeof encodings![0]!).toBe('object');
+		expect(Object.keys(encodings![0]!)).toEqual(['ssrc', 'dtx']);
+		expect(typeof encodings![0]!.ssrc).toBe('number');
 
 		rtcp = audioProducer.rtpParameters.rtcp;
 
@@ -436,16 +436,16 @@ test(
 		codecs = videoProducer.rtpParameters.codecs;
 
 		expect(codecs.length).toBe(2);
-		expect(codecs[0].mimeType).toBe('video/VP8');
-		expect(codecs[1].mimeType).toBe('video/rtx');
+		expect(codecs[0]!.mimeType).toBe('video/VP8');
+		expect(codecs[1]!.mimeType).toBe('video/rtx');
 
 		headerExtensions = videoProducer.rtpParameters.headerExtensions;
 
 		expect(headerExtensions!.length).toBe(2);
-		expect(headerExtensions![0].uri).toBe(
+		expect(headerExtensions![0]!.uri).toBe(
 			'http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time'
 		);
-		expect(headerExtensions![1].uri).toBe(
+		expect(headerExtensions![1]!.uri).toBe(
 			'urn:ietf:params:rtp-hdrext:sdes:mid'
 		);
 
@@ -454,10 +454,10 @@ test(
 		expect(Array.isArray(encodings)).toBe(true);
 		expect(encodings!.length).toBe(1);
 		expect(typeof encodings![0]).toBe('object');
-		expect(typeof encodings![0].ssrc).toBe('number');
-		expect(typeof encodings![0].rtx).toBe('object');
-		expect(Object.keys(encodings![0].rtx!)).toEqual(['ssrc']);
-		expect(typeof encodings![0].rtx!.ssrc).toBe('number');
+		expect(typeof encodings![0]!.ssrc).toBe('number');
+		expect(typeof encodings![0]!.rtx).toBe('object');
+		expect(Object.keys(encodings![0]!.rtx!)).toEqual(['ssrc']);
+		expect(typeof encodings![0]!.rtx!.ssrc).toBe('number');
 
 		rtcp = videoProducer.rtpParameters.rtcp;
 
@@ -579,8 +579,8 @@ test(
 		expect(Array.isArray(encodings)).toBe(true);
 		expect(encodings!.length).toBe(1);
 		expect(typeof encodings![0]).toBe('object');
-		expect(Object.keys(encodings![0])).toEqual(['ssrc', 'dtx']);
-		expect(typeof encodings![0].ssrc).toBe('number');
+		expect(Object.keys(encodings![0]!)).toEqual(['ssrc', 'dtx']);
+		expect(typeof encodings![0]!.ssrc).toBe('number');
 
 		rtcp = ctx.audioProducer!.rtpParameters.rtcp;
 
@@ -651,11 +651,11 @@ test(
 		expect(Array.isArray(encodings)).toBe(true);
 		expect(encodings!.length).toBe(1);
 		expect(typeof encodings![0]).toBe('object');
-		expect(Object.keys(encodings![0])).toEqual(['ssrc', 'rtx', 'dtx']);
-		expect(typeof encodings![0].ssrc).toBe('number');
-		expect(typeof encodings![0].rtx).toBe('object');
-		expect(Object.keys(encodings![0].rtx!)).toEqual(['ssrc']);
-		expect(typeof encodings![0].rtx!.ssrc).toBe('number');
+		expect(Object.keys(encodings![0]!)).toEqual(['ssrc', 'rtx', 'dtx']);
+		expect(typeof encodings![0]!.ssrc).toBe('number');
+		expect(typeof encodings![0]!.rtx).toBe('object');
+		expect(Object.keys(encodings![0]!.rtx!)).toEqual(['ssrc']);
+		expect(typeof encodings![0]!.rtx!.ssrc).toBe('number');
 
 		rtcp = videoConsumer.rtpParameters.rtcp;
 
@@ -722,7 +722,7 @@ test(
 test(
 	'transport.produce() with a receiving track succeeds',
 	async () => {
-		const audioTrack = ctx.audioConsumer!.track as FakeMediaStreamTrack;
+		const audioTrack = ctx.audioConsumer!.track as AiortcMediaStreamTrack;
 
 		expect(audioTrack.data.remote).toBe(true);
 
@@ -753,7 +753,7 @@ test(
 			audio: { source: 'file', file: 'src/test/data/small.mp4' },
 			video: { source: 'file', file: 'src/test/data/small.mp4' },
 		});
-		const newAudioTrack = stream.getTracks()[0];
+		const newAudioTrack = stream.getTracks()[0]!;
 
 		// Have the audio Producer paused.
 		ctx.audioProducer!.pause();
@@ -814,13 +814,13 @@ test(
 	TEST_TIMEOUT
 );
 
-test('consumer.pause() succeed', async () => {
+test('consumer.pause() succeed', () => {
 	ctx.audioConsumer!.pause();
 
 	expect(ctx.audioConsumer!.paused).toBe(true);
 });
 
-test('consumer.resume() succeed', async () => {
+test('consumer.resume() succeed', () => {
 	ctx.audioConsumer!.resume();
 
 	expect(ctx.audioConsumer!.paused).toBe(false);

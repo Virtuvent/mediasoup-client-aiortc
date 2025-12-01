@@ -12,24 +12,31 @@ const PIP_DEPS_DIR = path.resolve('worker/pip_deps');
 const PIP_DEV_DEPS_DIR = path.resolve('worker/pip_dev_deps');
 
 // Paths for ESLint to check. Converted to string for convenience.
-const ESLINT_PATHS = ['src', 'npm-scripts.mjs'].join(' ');
+const ESLINT_PATHS = [
+	'eslint.config.mjs',
+	'jest.config.mjs',
+	'npm-scripts.mjs',
+	'src',
+].join(' ');
+
 // Paths for ESLint to ignore. Converted to string argument for convenience.
 const ESLINT_IGNORE_PATTERN_ARGS = []
 	.map(entry => `--ignore-pattern ${entry}`)
 	.join(' ');
+
 // Paths for Prettier to check/write. Converted to string for convenience.
-// NOTE: Prettier ignores paths in .gitignore so we don't need to care about
-// node/src/fbs.
 const PRETTIER_PATHS = [
 	'README.md',
-	'src',
+	'eslint.config.mjs',
+	'jest.config.mjs',
 	'npm-scripts.mjs',
 	'package.json',
 	'tsconfig.json',
+	'src',
 ].join(' ');
 
 const task = process.argv[2];
-const args = process.argv.slice(3).join(' ');
+const taskArgs = process.argv.slice(3).join(' ');
 
 // Set PYTHONPATH env since we use custom locations for locally installed PIP
 // deps.
@@ -39,20 +46,22 @@ if (IS_WINDOWS) {
 	process.env.PYTHONPATH = `${PIP_DEPS_DIR}:${PIP_DEV_DEPS_DIR}:${process.env.PYTHONPATH}`;
 }
 
-run();
+void run();
 
 async function run() {
-	logInfo(args ? `[args:"${args}"]` : '');
+	logInfo(taskArgs ? `[args:"${taskArgs}"]` : '');
 
 	switch (task) {
 		// As per NPM documentation (https://docs.npmjs.com/cli/v9/using-npm/scripts)
 		// `prepare` script:
 		//
-		// - Runs BEFORE the package is packed, i.e. during `npm publish` and `npm pack`.
+		// - Runs BEFORE the package is packed, i.e. during `npm publish` and
+		//   `npm pack`.
 		// - Runs on local `npm install` without any arguments.
-		// - NOTE: If a package being installed through git contains a `prepare` script,
-		//   its dependencies and devDependencies will be installed, and the `prepare`
-		//   script will be run, before the package is packaged and installed.
+		// - NOTE: If a package being installed through git contains a `prepare`
+		//   script, its dependencies and devDependencies will be installed, and
+		//   the `prepare` script will be run, before the package is packaged and
+		//   installed.
 		//
 		// So here we compile TypeScript to JavaScript.
 		case 'prepare': {
@@ -68,7 +77,6 @@ async function run() {
 		}
 
 		case 'typescript:build': {
-			installNodeDeps();
 			buildTypescript({ force: true });
 			replacePythonVersion();
 
@@ -76,8 +84,7 @@ async function run() {
 		}
 
 		case 'typescript:watch': {
-			deleteNodeLib();
-			executeCmd(`tsc --watch ${args}`);
+			watchTypescript();
 
 			break;
 		}
@@ -101,7 +108,6 @@ async function run() {
 		}
 
 		case 'test': {
-			buildTypescript({ force: false });
 			replacePythonVersion();
 			test();
 
@@ -109,10 +115,25 @@ async function run() {
 		}
 
 		case 'coverage': {
-			buildTypescript({ force: false });
 			replacePythonVersion();
-			executeCmd('jest --coverage');
+			executeCmd(`jest --coverage ${taskArgs}`);
 			executeCmd('open-cli coverage/lcov-report/index.html');
+
+			break;
+		}
+
+		case 'docker:build': {
+			executeCmd(
+				'docker build -f Dockerfile --tag mediasoup-client-aiort/docker:latest .'
+			);
+
+			break;
+		}
+
+		case 'docker:run': {
+			executeInteractiveCmd(
+				'docker run --name=mediasoupClientAiortcDocker -it --rm --privileged --cap-add SYS_PTRACE -v "./:/mediasoup-client-aiortc" mediasoup-client-aiort/docker:latest'
+			);
 
 			break;
 		}
@@ -124,12 +145,7 @@ async function run() {
 		}
 
 		case 'release': {
-			checkRelease();
-			executeCmd(`git commit -am '${PKG.version}'`, /* exitOnError */ false);
-			executeCmd(`git tag -a ${PKG.version} -m '${PKG.version}'`);
-			executeCmd(`git push origin v${MAYOR_VERSION}`);
-			executeCmd(`git push origin '${PKG.version}'`);
-			executeCmd('npm publish');
+			release();
 
 			break;
 		}
@@ -177,15 +193,25 @@ function deleteNodeLib() {
 	fs.rmSync('node/lib', { recursive: true, force: true });
 }
 
-function buildTypescript({ force = false } = { force: false }) {
-	if (!force && fs.existsSync('lib')) {
+function buildTypescript({ force }) {
+	if (!force && fs.existsSync('node/lib')) {
 		return;
 	}
 
 	logInfo('buildTypescript()');
 
 	deleteNodeLib();
+
+	// Generate .js CommonJS code and .d.ts TypeScript declaration files in lib/.
 	executeCmd('tsc');
+}
+
+function watchTypescript() {
+	logInfo('watchTypescript()');
+
+	deleteNodeLib();
+
+	executeCmd('tsc --watch');
 }
 
 function lintNode() {
@@ -193,10 +219,10 @@ function lintNode() {
 
 	// Ensure there are no rules that are unnecessary or conflict with Prettier
 	// rules.
-	executeCmd('eslint-config-prettier .eslintrc.js');
+	executeCmd('eslint-config-prettier eslint.config.mjs');
 
 	executeCmd(
-		`eslint -c .eslintrc.js --ext=ts,js,mjs --max-warnings 0 ${ESLINT_IGNORE_PATTERN_ARGS} ${ESLINT_PATHS}`
+		`eslint -c eslint.config.mjs --max-warnings 0 ${ESLINT_IGNORE_PATTERN_ARGS} ${ESLINT_PATHS}`
 	);
 
 	executeCmd(`prettier --check ${PRETTIER_PATHS}`);
@@ -208,6 +234,7 @@ function lintPython() {
 	installPythonDevDeps();
 
 	executeCmd(`cd worker && "${PYTHON}" -m flake8 --filename *.py && cd ..`);
+
 	executeCmd(
 		`cd worker && "${PYTHON}" -m mypy --exclude pip_deps --exclude pip_dev_deps . && cd ..`
 	);
@@ -222,7 +249,7 @@ function formatNode() {
 function test() {
 	logInfo('test()');
 
-	executeCmd(`jest --silent false --detectOpenHandles ${args}`);
+	executeCmd(`jest --silent false --detectOpenHandles ${taskArgs}`);
 }
 
 function installNodeDeps() {
@@ -230,8 +257,12 @@ function installNodeDeps() {
 
 	// Install/update deps.
 	executeCmd('npm ci --ignore-scripts');
+
 	// Update package-lock.json.
 	executeCmd('npm install --package-lock-only --ignore-scripts');
+
+	// Check vulnerabilities in deps.
+	executeCmd('npm audit');
 }
 
 function installPythonDeps() {
@@ -239,10 +270,19 @@ function installPythonDeps() {
 
 	// Install PIP deps into custom location, so we don't depend on system-wide
 	// installation.
-	executeCmd(
-		`"${PYTHON}" -m pip install --upgrade --no-user --target="${PIP_DEPS_DIR}" worker/`,
-		/* exitOnError */ true
+	// However this may fail due to different PIP and OS versions, so let's do a
+	// best effort.
+	const res = executeCmd(
+		`"${PYTHON}" -m pip install --upgrade --no-user --target="${PIP_DEPS_DIR}" ${taskArgs} worker/`,
+		/* exitOnError */ false
 	);
+
+	if (!res) {
+		executeCmd(
+			`"${PYTHON}" -m pip install --upgrade --no-user --target="${PIP_DEPS_DIR}" ${taskArgs} --break-system-packages worker/`,
+			/* exitOnError */ true
+		);
+	}
 }
 
 function installPythonDevDeps() {
@@ -264,9 +304,7 @@ function checkRelease() {
 	buildTypescript({ force: true });
 	replacePythonVersion();
 	lintNode();
-	// TODO: Disabled due to
-	// https://github.com/versatica/mediasoup-client-aiortc/issues/25
-	// lintPython();
+	lintPython();
 
 	// Tests fail sometimes due to OS/network stuff.
 	if (process.env.SKIP_TEST !== 'true') {
@@ -274,11 +312,30 @@ function checkRelease() {
 	}
 }
 
+function release() {
+	logInfo('release()');
+
+	checkRelease();
+	executeCmd(`git commit -am '${PKG.version}'`);
+	executeCmd(`git tag -a ${PKG.version} -m '${PKG.version}'`);
+	executeCmd(`git push origin v${MAYOR_VERSION}`);
+	executeCmd(`git push origin '${PKG.version}'`);
+	executeInteractiveCmd('npm publish');
+}
+
+/**
+ * Returns true if the command succeeded, 0 otherwise.
+ *
+ * If exitOnError is set and command fails, then process is terminated with
+ * error.
+ */
 function executeCmd(command, exitOnError = true) {
 	logInfo(`executeCmd(): ${command}`);
 
 	try {
 		execSync(command, { stdio: ['ignore', process.stdout, process.stderr] });
+
+		return true;
 	} catch (error) {
 		if (exitOnError) {
 			logError(`executeCmd() failed, exiting: ${error}`);
@@ -286,24 +343,38 @@ function executeCmd(command, exitOnError = true) {
 			exitWithError();
 		} else {
 			logInfo(`executeCmd() failed, ignoring: ${error}`);
+
+			return false;
 		}
 	}
 }
 
-function logInfo(message) {
+function executeInteractiveCmd(command) {
+	logInfo(`executeInteractiveCmd(): ${command}`);
+
+	try {
+		execSync(command, { stdio: 'inherit', env: process.env });
+	} catch (error) {
+		logError(`executeInteractiveCmd() failed, exiting: ${error}`);
+
+		exitWithError();
+	}
+}
+
+function logInfo(...args) {
 	// eslint-disable-next-line no-console
-	console.log(`npm-scripts \x1b[36m[INFO] [${task}]\x1b[0m`, message);
+	console.log(`npm-scripts.mjs \x1b[36m[INFO] [${task}]\x1b[0m`, ...args);
 }
 
 // eslint-disable-next-line no-unused-vars
-function logWarn(message) {
+function logWarn(...args) {
 	// eslint-disable-next-line no-console
-	console.warn(`npm-scripts \x1b[33m[WARN] [${task}]\x1b[0m`, message);
+	console.warn(`npm-scripts.mjs \x1b[33m[WARN] [${task}]\x1b\0m`, ...args);
 }
 
-function logError(message) {
+function logError(...args) {
 	// eslint-disable-next-line no-console
-	console.error(`npm-scripts \x1b[31m[ERROR] [${task}]\x1b[0m`, message);
+	console.error(`npm-scripts.mjs \x1b[31m[ERROR] [${task}]\x1b[0m`, ...args);
 }
 
 function exitWithError() {

@@ -1,11 +1,12 @@
-import process from 'node:process';
-import os from 'node:os';
-import path from 'node:path';
+import * as process from 'node:process';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import type { Duplex } from 'node:stream';
 import { spawn, execSync, ChildProcess } from 'node:child_process';
-import { v4 as uuidv4 } from 'uuid';
-import { Logger } from 'mediasoup-client/lib/Logger';
-import { EnhancedEventEmitter } from 'mediasoup-client/lib/EnhancedEventEmitter';
-import { HandlerFactory } from 'mediasoup-client/lib/handlers/HandlerInterface';
+import { v4 as uuidv4 } from '@lukeed/uuid/secure';
+import type { HandlerFactory } from 'mediasoup-client/types';
+import { Logger } from './Logger';
+import { EnhancedEventEmitter } from './enhancedEvents';
 import { Channel } from './Channel';
 import * as media from './media';
 import { AiortcMediaStream } from './AiortcMediaStream';
@@ -13,7 +14,7 @@ import { Handler } from './Handler';
 
 // Whether the Python subprocess should log via PIPE to Node.js or directly to
 // stdout and stderr.
-const PYTHON_LOG_VIA_PIPE = process.env.PYTHON_LOG_TO_STDOUT !== 'true';
+const PYTHON_LOG_VIA_PIPE = process.env['PYTHON_LOG_TO_STDOUT'] !== 'true';
 const IS_WINDOWS = os.platform() === 'win32';
 const PYTHON = getPython();
 const PIP_DEPS_DIR = path.join(__dirname, '..', 'worker', 'pip_deps');
@@ -87,8 +88,8 @@ export class Worker extends EnhancedEventEmitter<WorkerEvents> {
 				env: {
 					...process.env,
 					PYTHONPATH: IS_WINDOWS
-						? `${PIP_DEPS_DIR};${process.env.PYTHONPATH}`
-						: `${PIP_DEPS_DIR}:${process.env.PYTHONPATH}`,
+						? `${PIP_DEPS_DIR};${process.env['PYTHONPATH']}`
+						: `${PIP_DEPS_DIR}:${process.env['PYTHONPATH']}`,
 				},
 				detached: false,
 				// fd 0 (stdin)   : Just ignore it.
@@ -107,7 +108,7 @@ export class Worker extends EnhancedEventEmitter<WorkerEvents> {
 		this.#pid = this.#child.pid!;
 
 		this.#channel = new Channel({
-			socket: this.#child.stdio[3],
+			socket: this.#child.stdio[3]! as Duplex,
 			pid: this.#pid,
 		});
 
@@ -267,7 +268,7 @@ export class Worker extends EnhancedEventEmitter<WorkerEvents> {
 	/**
 	 * Close the Worker.
 	 */
-	close(): void {
+	override close(): void {
 		if (this.#closed) {
 			return;
 		}
@@ -287,8 +288,12 @@ export class Worker extends EnhancedEventEmitter<WorkerEvents> {
 
 		// Close the Channel instance.
 		this.#channel.close();
+
+		// Invoke close() in EnhancedEventEmitter classes.
+		super.close();
 	}
 
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	async dump(): Promise<any> {
 		logger.debug('dump()');
 
@@ -312,23 +317,15 @@ export class Worker extends EnhancedEventEmitter<WorkerEvents> {
 	createHandlerFactory(): HandlerFactory {
 		logger.debug('createHandlerFactory()');
 
-		return (): Handler => {
-			const internal = { handlerId: uuidv4() };
-			const handler = new Handler({
-				internal,
-				channel: this.#channel,
-			});
+		const handlerId: string = uuidv4();
+		const channel: Channel = this.#channel;
 
-			this.#handlers.add(handler);
-			handler.on('@close', () => this.#handlers.delete(handler));
-
-			return handler;
-		};
+		return Handler.createFactory(handlerId, channel);
 	}
 }
 
-function getPython() {
-	let python = process.env.PYTHON;
+function getPython(): string {
+	let python = process.env['PYTHON'];
 
 	if (!python) {
 		try {

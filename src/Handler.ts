@@ -1,14 +1,15 @@
-import { v4 as uuidv4 } from 'uuid';
+import { v4 as uuidv4 } from '@lukeed/uuid/secure';
 import * as sdpTransform from 'sdp-transform';
+import type * as SdpTransform from 'sdp-transform';
 import { FakeMediaStreamTrack } from 'fake-mediastreamtrack';
-import { UnsupportedError } from 'mediasoup-client/lib/errors';
-import * as utils from 'mediasoup-client/lib/utils';
-import * as ortc from 'mediasoup-client/lib/ortc';
-import * as sdpCommonUtils from 'mediasoup-client/lib/handlers/sdp/commonUtils';
-import * as sdpUnifiedPlanUtils from 'mediasoup-client/lib/handlers/sdp/unifiedPlanUtils';
-import {
+import * as ortc from 'mediasoup-client/ortc';
+import * as sdpCommonUtils from 'mediasoup-client/handlers/sdp/commonUtils';
+import * as sdpUnifiedPlanUtils from 'mediasoup-client/handlers/sdp/unifiedPlanUtils';
+import type {
+	HandlerFactory,
 	HandlerInterface,
-	HandlerRunOptions,
+	HandlerEvents,
+	HandlerOptions,
 	HandlerSendOptions,
 	HandlerSendResult,
 	HandlerReceiveOptions,
@@ -17,26 +18,32 @@ import {
 	HandlerSendDataChannelResult,
 	HandlerReceiveDataChannelOptions,
 	HandlerReceiveDataChannelResult,
-} from 'mediasoup-client/lib/handlers/HandlerInterface';
-import { RemoteSdp } from 'mediasoup-client/lib/handlers/sdp/RemoteSdp';
-import {
 	IceParameters,
 	DtlsRole,
 	RtpCapabilities,
-	RtpParameters,
+	MediaKind,
+	ExtendedRtpCapabilities,
 	SctpCapabilities,
 	SctpStreamParameters,
-} from 'mediasoup-client/lib/types';
+} from 'mediasoup-client/types';
+import { RemoteSdp } from 'mediasoup-client/handlers/sdp/RemoteSdp';
+import { EnhancedEventEmitter } from 'mediasoup-client/enhancedEvents';
 import { Logger } from './Logger';
 import { Channel } from './Channel';
+import type { AiortcMediaStreamTrack } from './AiortcMediaStream';
 import { FakeRTCStatsReport } from './FakeRTCStatsReport';
 import { FakeRTCDataChannel } from './FakeRTCDataChannel';
+import { UnsupportedError } from './errors';
 
 const logger = new Logger('Handler');
 
+const NAME = 'Aiortc';
 const SCTP_NUM_STREAMS = { OS: 65535, MIS: 65535 };
 
-export class Handler extends HandlerInterface {
+export class Handler
+	extends EnhancedEventEmitter<HandlerEvents>
+	implements HandlerInterface
+{
 	// Internal data.
 	readonly #internal: { handlerId: string };
 	// Channel instance.
@@ -46,16 +53,15 @@ export class Handler extends HandlerInterface {
 	// Running flag. It means that the handler has been told to the worker.
 	#running = false;
 	// Handler direction.
-	#direction?: 'send' | 'recv';
+	#direction: 'send' | 'recv';
 	// Remote SDP handler.
-	#remoteSdp?: RemoteSdp;
-	// Generic sending RTP parameters for audio and video.
-	#sendingRtpParametersByKind?: { [key: string]: RtpParameters };
-	// Generic sending RTP parameters for audio and video suitable for the SDP
-	// remote answer.
-	#sendingRemoteRtpParametersByKind?: { [key: string]: RtpParameters };
+	#remoteSdp: RemoteSdp;
+	// Callback to request sending extended RTP capabilities on demand.
+	#getSendExtendedRtpCapabilities: (
+		nativeRtpCapabilities: RtpCapabilities
+	) => ExtendedRtpCapabilities;
 	// Map of sending and receiving tracks indexed by localId.
-	readonly #mapLocalIdTracks: Map<string, FakeMediaStreamTrack> = new Map();
+	readonly #mapLocalIdTracks: Map<string, AiortcMediaStreamTrack> = new Map();
 	// Map of MID indexed by local ids.
 	readonly #mapLocalIdMid: Map<string, string> = new Map();
 	// Got transport local and remote parameters.
@@ -65,22 +71,96 @@ export class Handler extends HandlerInterface {
 	// Next DataChannel id.
 	#nextSendSctpStreamId = 0;
 
-	/**
-	 * Addicional events.
-	 *
-	 * @emits @close
-	 */
-	constructor({
-		internal,
-		channel,
-	}: {
-		internal: { handlerId: string };
-		channel: Channel;
-	}) {
+	static createFactory(handlerId: string, channel: Channel): HandlerFactory {
+		return {
+			name: NAME,
+			factory: (options: HandlerOptions): Handler =>
+				new Handler(options, handlerId, channel),
+			getNativeRtpCapabilities: async (): Promise<RtpCapabilities> => {
+				logger.debug('getNativeRtpCapabilities()');
+
+				const sdp = await channel.request('getRtpCapabilities');
+				const sdpObject = sdpTransform.parse(sdp);
+				const nativeRtpCapabilities =
+					Handler.getLocalRtpCapabilities(sdpObject);
+
+				return nativeRtpCapabilities;
+			},
+			getNativeSctpCapabilities: async (): Promise<SctpCapabilities> => {
+				logger.debug('getNativeSctpCapabilities()');
+
+				return {
+					numStreams: SCTP_NUM_STREAMS,
+				};
+			},
+		};
+	}
+
+	private static getLocalRtpCapabilities(
+		localSdpObject: SdpTransform.SessionDescription
+	): RtpCapabilities {
+		const nativeRtpCapabilities = sdpCommonUtils.extractRtpCapabilities({
+			sdpObject: localSdpObject,
+		});
+
+		return nativeRtpCapabilities;
+	}
+
+	private constructor(
+		{
+			direction,
+			iceParameters,
+			iceCandidates,
+			dtlsParameters,
+			sctpParameters,
+			iceServers,
+			// iceTransportPolicy,
+			// additionalSettings,
+			getSendExtendedRtpCapabilities,
+		}: HandlerOptions,
+		handlerId: string,
+		channel: Channel
+	) {
 		super();
 
-		this.#internal = internal;
+		logger.debug('constructor()');
+
+		this.#internal = { handlerId };
 		this.#channel = channel;
+
+		this.#direction = direction;
+
+		// aiortc only supports "sha-256" hash algorithm.
+		dtlsParameters.fingerprints = dtlsParameters.fingerprints.filter(
+			f => f.algorithm === 'sha-256'
+		);
+
+		this.#remoteSdp = new RemoteSdp({
+			iceParameters,
+			iceCandidates,
+			dtlsParameters,
+			sctpParameters,
+		});
+
+		this.#getSendExtendedRtpCapabilities = getSendExtendedRtpCapabilities;
+
+		const options = {
+			rtcConfiguration: { iceServers },
+		};
+
+		// Notify the worker so it will create a handler.
+		this.#channel
+			.request('createHandler', this.#internal, options)
+			.catch(error => {
+				logger.error(`handler creation in the worker failed: ${error}`);
+
+				this.close();
+			});
+
+		// Set the running flag.
+		this.#running = true;
+
+		this.handleWorkerNotifications();
 	}
 
 	get closed(): boolean {
@@ -88,10 +168,10 @@ export class Handler extends HandlerInterface {
 	}
 
 	get name(): string {
-		return 'Aiortc';
+		return NAME;
 	}
 
-	close(): void {
+	override close(): void {
 		logger.debug('close()');
 
 		if (this.#closed) {
@@ -117,88 +197,9 @@ export class Handler extends HandlerInterface {
 
 		// Tell the parent.
 		this.emit('@close');
-	}
 
-	async getNativeRtpCapabilities(): Promise<RtpCapabilities> {
-		logger.debug('getNativeRtpCapabilities()');
-
-		const sdp = await this.#channel.request('getRtpCapabilities');
-
-		const sdpObject = sdpTransform.parse(sdp);
-		const caps = sdpCommonUtils.extractRtpCapabilities({ sdpObject });
-
-		return caps;
-	}
-
-	async getNativeSctpCapabilities(): Promise<SctpCapabilities> {
-		logger.debug('getNativeSctpCapabilities()');
-
-		return {
-			numStreams: SCTP_NUM_STREAMS,
-		};
-	}
-
-	run({
-		direction,
-		iceParameters,
-		iceCandidates,
-		dtlsParameters,
-		sctpParameters,
-		iceServers,
-		iceTransportPolicy, // eslint-disable-line @typescript-eslint/no-unused-vars
-		additionalSettings, // eslint-disable-line @typescript-eslint/no-unused-vars
-		proprietaryConstraints, // eslint-disable-line @typescript-eslint/no-unused-vars
-		extendedRtpCapabilities,
-	}: HandlerRunOptions): void {
-		logger.debug('run()');
-
-		this.#direction = direction;
-
-		// aiortc only supports "sha-256" hash algorithm.
-		dtlsParameters.fingerprints = dtlsParameters.fingerprints.filter(
-			f => f.algorithm === 'sha-256'
-		);
-
-		this.#remoteSdp = new RemoteSdp({
-			iceParameters,
-			iceCandidates,
-			dtlsParameters,
-			sctpParameters,
-		});
-
-		this.#sendingRtpParametersByKind = {
-			audio: ortc.getSendingRtpParameters('audio', extendedRtpCapabilities),
-			video: ortc.getSendingRtpParameters('video', extendedRtpCapabilities),
-		};
-
-		this.#sendingRemoteRtpParametersByKind = {
-			audio: ortc.getSendingRemoteRtpParameters(
-				'audio',
-				extendedRtpCapabilities
-			),
-			video: ortc.getSendingRemoteRtpParameters(
-				'video',
-				extendedRtpCapabilities
-			),
-		};
-
-		const options = {
-			rtcConfiguration: { iceServers },
-		};
-
-		// Notify the worker so it will create a handler.
-		this.#channel
-			.request('createHandler', this.#internal, options)
-			.catch(error => {
-				logger.error(`handler creation in the worker failed: ${error}`);
-
-				this.close();
-			});
-
-		// Set the running flag.
-		this.#running = true;
-
-		this.handleWorkerNotifications();
+		// Invoke close() in EnhancedEventEmitter classes.
+		super.close();
 	}
 
 	// eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -230,12 +231,12 @@ export class Handler extends HandlerInterface {
 			'send() [kind:%s, track.id:%s, track.data:%o]',
 			track.kind,
 			track.id,
-			(track as FakeMediaStreamTrack).data
+			(track as AiortcMediaStreamTrack).data
 		);
 
 		const localId = track.id;
 		const kind = track.kind;
-		const { playerId, remote } = (track as FakeMediaStreamTrack).data;
+		const { playerId, remote } = (track as AiortcMediaStreamTrack).data;
 
 		if (playerId) {
 			await this.#channel.request('handler.addTrack', this.#internal, {
@@ -255,8 +256,27 @@ export class Handler extends HandlerInterface {
 			);
 		}
 
-		const sendingRtpParameters = utils.clone<RtpParameters>(
-			this.#sendingRtpParametersByKind![track.kind]
+		let offer = await this.#channel.request(
+			'handler.createOffer',
+			this.#internal
+		);
+
+		let localSdpObject = sdpTransform.parse(offer.sdp);
+
+		if (localSdpObject.extmapAllowMixed) {
+			this.#remoteSdp.setSessionExtmapAllowMixed();
+		}
+
+		const nativeRtpCapabilities =
+			Handler.getLocalRtpCapabilities(localSdpObject);
+		const sendExtendedRtpCapabilities = this.#getSendExtendedRtpCapabilities(
+			nativeRtpCapabilities
+		);
+
+		// Generic sending RTP parameters.
+		const sendingRtpParameters = ortc.getSendingRtpParameters(
+			track.kind as MediaKind,
+			sendExtendedRtpCapabilities
 		);
 
 		// This may throw.
@@ -265,21 +285,17 @@ export class Handler extends HandlerInterface {
 			codec
 		);
 
-		const sendingRemoteRtpParameters =
-			this.#sendingRemoteRtpParametersByKind![track.kind];
+		// Generic sending RTP parameters suitable for the SDP remote answer.
+		const sendingRemoteRtpParameters = ortc.getSendingRemoteRtpParameters(
+			track.kind as MediaKind,
+			sendExtendedRtpCapabilities
+		);
 
 		// This may throw.
 		sendingRemoteRtpParameters.codecs = ortc.reduceCodecs(
 			sendingRemoteRtpParameters.codecs,
 			codec
 		);
-
-		let offer = await this.#channel.request(
-			'handler.createOffer',
-			this.#internal
-		);
-
-		let localSdpObject = sdpTransform.parse(offer.sdp);
 
 		if (!this.#transportReady) {
 			await this.setupTransport({ localDtlsRole: 'server', localSdpObject });
@@ -293,7 +309,7 @@ export class Handler extends HandlerInterface {
 		await this.#channel.request(
 			'handler.setLocalDescription',
 			this.#internal,
-			offer as RTCSessionDescription
+			offer
 		);
 
 		// Get the MID and the corresponding m= section.
@@ -312,7 +328,7 @@ export class Handler extends HandlerInterface {
 
 		const offerMediaObject = localSdpObject.media.find(
 			m => String(m.mid) === String(mid)
-		);
+		)!;
 
 		// Set MID.
 		sendingRtpParameters.mid = mid;
@@ -327,16 +343,15 @@ export class Handler extends HandlerInterface {
 			offerMediaObject,
 		});
 
-		this.#remoteSdp!.send({
+		this.#remoteSdp.send({
 			offerMediaObject,
 			reuseMid: '', // May be in the future.
 			offerRtpParameters: sendingRtpParameters,
 			answerRtpParameters: sendingRemoteRtpParameters,
 			codecOptions,
-			extmapAllowMixed: false,
 		});
 
-		const answer = { type: 'answer', sdp: this.#remoteSdp!.getSdp() };
+		const answer = { type: 'answer', sdp: this.#remoteSdp.getSdp() };
 
 		logger.debug(
 			'send() | calling handler.setRemoteDescription() [answer:%o]',
@@ -346,11 +361,11 @@ export class Handler extends HandlerInterface {
 		await this.#channel.request(
 			'handler.setRemoteDescription',
 			this.#internal,
-			answer as RTCSessionDescription
+			answer
 		);
 
 		// Store the original track into our map and listen for events.
-		this.#mapLocalIdTracks.set(localId, track as FakeMediaStreamTrack);
+		this.#mapLocalIdTracks.set(localId, track as AiortcMediaStreamTrack);
 
 		track.addEventListener('@enabledchange', () => {
 			// Ensure we are still sending this track.
@@ -408,7 +423,7 @@ export class Handler extends HandlerInterface {
 			localId,
 		});
 
-		this.#remoteSdp!.disableMediaSection(mid);
+		this.#remoteSdp.disableMediaSection(mid);
 
 		const offer = await this.#channel.request(
 			'handler.createOffer',
@@ -423,10 +438,10 @@ export class Handler extends HandlerInterface {
 		await this.#channel.request(
 			'handler.setLocalDescription',
 			this.#internal,
-			offer as RTCSessionDescription
+			offer
 		);
 
-		const answer = { type: 'answer', sdp: this.#remoteSdp!.getSdp() };
+		const answer = { type: 'answer', sdp: this.#remoteSdp.getSdp() };
 
 		logger.debug(
 			'stopSending() | calling handler.setRemoteDescription() [answer:%o]',
@@ -436,7 +451,7 @@ export class Handler extends HandlerInterface {
 		await this.#channel.request(
 			'handler.setRemoteDescription',
 			this.#internal,
-			answer as RTCSessionDescription
+			answer
 		);
 	}
 
@@ -475,10 +490,10 @@ export class Handler extends HandlerInterface {
 		await this.#channel.request(
 			'handler.setLocalDescription',
 			this.#internal,
-			offer as RTCSessionDescription
+			offer
 		);
 
-		const answer = { type: 'answer', sdp: this.#remoteSdp!.getSdp() };
+		const answer = { type: 'answer', sdp: this.#remoteSdp.getSdp() };
 
 		logger.debug(
 			'pauseSending() | calling handler.setRemoteDescription() [answer:%o]',
@@ -488,7 +503,7 @@ export class Handler extends HandlerInterface {
 		await this.#channel.request(
 			'handler.setRemoteDescription',
 			this.#internal,
-			answer as RTCSessionDescription
+			answer
 		);
 	}
 
@@ -527,10 +542,10 @@ export class Handler extends HandlerInterface {
 		await this.#channel.request(
 			'handler.setLocalDescription',
 			this.#internal,
-			offer as RTCSessionDescription
+			offer
 		);
 
-		const answer = { type: 'answer', sdp: this.#remoteSdp!.getSdp() };
+		const answer = { type: 'answer', sdp: this.#remoteSdp.getSdp() };
 
 		logger.debug(
 			'stopSending() | calling handler.setRemoteDescription() [answer:%o]',
@@ -540,7 +555,7 @@ export class Handler extends HandlerInterface {
 		await this.#channel.request(
 			'handler.setRemoteDescription',
 			this.#internal,
-			answer as RTCSessionDescription
+			answer
 		);
 	}
 
@@ -571,7 +586,7 @@ export class Handler extends HandlerInterface {
 		}
 
 		const kind = track.kind;
-		const { playerId, remote } = (track as FakeMediaStreamTrack).data;
+		const { playerId, remote } = (track as AiortcMediaStreamTrack).data;
 
 		if (playerId) {
 			await this.#channel.request('handler.replaceTrack', this.#internal, {
@@ -590,7 +605,7 @@ export class Handler extends HandlerInterface {
 		}
 
 		// Store the new original track into our map and listen for events.
-		this.#mapLocalIdTracks.set(localId, track as FakeMediaStreamTrack);
+		this.#mapLocalIdTracks.set(localId, track as AiortcMediaStreamTrack);
 
 		track.addEventListener('@enabledchange', () => {
 			// Ensure we are still sending this track.
@@ -622,8 +637,12 @@ export class Handler extends HandlerInterface {
 		throw new UnsupportedError('not implemented');
 	}
 
-	// eslint-disable-next-line @typescript-eslint/no-unused-vars
-	async setRtpEncodingParameters(localId: string, params: any): Promise<void> {
+	async setRtpEncodingParameters(
+		// eslint-disable-next-line @typescript-eslint/no-unused-vars
+		localId: string,
+		// eslint-disable-next-line @typescript-eslint/no-unused-vars
+		params: Partial<RTCRtpEncodingParameters>
+	): Promise<void> {
 		throw new UnsupportedError('not implemented');
 	}
 
@@ -663,8 +682,8 @@ export class Handler extends HandlerInterface {
 			negotiated: true,
 			id: this.#nextSendSctpStreamId,
 			ordered,
-			maxPacketLifeTime: maxPacketLifeTime || null, // Important.
-			maxRetransmits: maxRetransmits || null, // Important.
+			maxPacketLifeTime: maxPacketLifeTime ?? null, // Important.
+			maxRetransmits: maxRetransmits ?? null, // Important.
 			label,
 			protocol,
 		};
@@ -711,8 +730,8 @@ export class Handler extends HandlerInterface {
 
 			const localSdpObject = sdpTransform.parse(offer.sdp);
 			const offerMediaObject = localSdpObject.media.find(
-				(m: any) => m.type === 'application'
-			);
+				m => m.type === 'application'
+			)!;
 
 			if (!this.#transportReady) {
 				await this.setupTransport({ localDtlsRole: 'server', localSdpObject });
@@ -726,12 +745,12 @@ export class Handler extends HandlerInterface {
 			await this.#channel.request(
 				'handler.setLocalDescription',
 				this.#internal,
-				offer as RTCSessionDescription
+				offer
 			);
 
-			this.#remoteSdp!.sendSctpAssociation({ offerMediaObject });
+			this.#remoteSdp.sendSctpAssociation({ offerMediaObject });
 
-			const answer = { type: 'answer', sdp: this.#remoteSdp!.getSdp() };
+			const answer = { type: 'answer', sdp: this.#remoteSdp.getSdp() };
 
 			logger.debug(
 				'sendDataChannel() | calling handler.setRemoteDescription() [answer:%o]',
@@ -741,7 +760,7 @@ export class Handler extends HandlerInterface {
 			await this.#channel.request(
 				'handler.setRemoteDescription',
 				this.#internal,
-				answer as RTCSessionDescription
+				answer
 			);
 
 			this.#hasDataChannelMediaSection = true;
@@ -750,13 +769,11 @@ export class Handler extends HandlerInterface {
 		const sctpStreamParameters: SctpStreamParameters = {
 			streamId: result.streamId,
 			ordered: result.ordered,
-			maxPacketLifeTime: result.maxPacketLifeTime || undefined,
-			maxRetransmits: result.maxRetransmits || undefined,
+			maxPacketLifeTime: result.maxPacketLifeTime ?? undefined,
+			maxRetransmits: result.maxRetransmits ?? undefined,
 		};
 
 		return {
-			// TODO: https://github.com/versatica/mediasoup-client-aiortc/issues/24
-			// @ts-ignore
 			dataChannel,
 			sctpStreamParameters,
 		};
@@ -775,11 +792,11 @@ export class Handler extends HandlerInterface {
 
 			logger.debug('receive() [trackId:%s, kind:%s]', trackId, kind);
 
-			const localId = rtpParameters.mid || String(this.#mapLocalIdMid.size);
+			const localId = rtpParameters.mid ?? String(this.#mapLocalIdMid.size);
 
 			mapLocalId.set(trackId, localId);
 
-			this.#remoteSdp!.receive({
+			this.#remoteSdp.receive({
 				mid: localId,
 				kind,
 				offerRtpParameters: rtpParameters,
@@ -788,7 +805,7 @@ export class Handler extends HandlerInterface {
 			});
 		}
 
-		const offer = { type: 'offer', sdp: this.#remoteSdp!.getSdp() };
+		const offer = { type: 'offer', sdp: this.#remoteSdp.getSdp() };
 
 		logger.debug(
 			'receive() | calling handler.setRemoteDescription() [offer:%o]',
@@ -798,7 +815,7 @@ export class Handler extends HandlerInterface {
 		await this.#channel.request(
 			'handler.setRemoteDescription',
 			this.#internal,
-			offer as RTCSessionDescription
+			offer
 		);
 
 		let answer = await this.#channel.request(
@@ -812,8 +829,8 @@ export class Handler extends HandlerInterface {
 			const { trackId, rtpParameters } = options;
 			const localId = mapLocalId.get(trackId);
 			const answerMediaObject = localSdpObject.media.find(
-				(m: any) => String(m.mid) === localId
-			);
+				m => String(m.mid) === localId
+			)!;
 
 			// May need to modify codec parameters in the answer based on codec
 			// parameters in the offer.
@@ -826,7 +843,7 @@ export class Handler extends HandlerInterface {
 		answer = {
 			type: 'answer',
 			sdp: sdpTransform.write(localSdpObject),
-		} as RTCSessionDescription;
+		};
 
 		if (!this.#transportReady) {
 			await this.setupTransport({ localDtlsRole: 'client', localSdpObject });
@@ -840,17 +857,18 @@ export class Handler extends HandlerInterface {
 		await this.#channel.request(
 			'handler.setLocalDescription',
 			this.#internal,
-			answer as RTCSessionDescription
+			answer
 		);
 
 		// Create fake remote tracks to be returned.
 		for (const options of optionsList) {
 			const { trackId, kind } = options;
 			const localId = mapLocalId.get(trackId)!;
-			const track = new FakeMediaStreamTrack({
+			const track: AiortcMediaStreamTrack = new FakeMediaStreamTrack({
 				kind,
 				id: trackId,
-				data: { remote: true }, // This let's us know that this is remote.
+				// This is for us to know that this is a remote track.
+				data: { remote: true },
 			});
 
 			// Store the remote track into the map.
@@ -887,10 +905,10 @@ export class Handler extends HandlerInterface {
 				throw new Error('associated MID not found');
 			}
 
-			this.#remoteSdp!.closeMediaSection(mid);
+			this.#remoteSdp.closeMediaSection(mid);
 		}
 
-		const offer = { type: 'offer', sdp: this.#remoteSdp!.getSdp() };
+		const offer = { type: 'offer', sdp: this.#remoteSdp.getSdp() };
 
 		logger.debug(
 			'stopReceiving() | calling handler.setRemoteDescription() [offer:%o]',
@@ -900,7 +918,7 @@ export class Handler extends HandlerInterface {
 		await this.#channel.request(
 			'handler.setRemoteDescription',
 			this.#internal,
-			offer as RTCSessionDescription
+			offer
 		);
 
 		const answer = await this.#channel.request(
@@ -916,7 +934,7 @@ export class Handler extends HandlerInterface {
 		await this.#channel.request(
 			'handler.setLocalDescription',
 			this.#internal,
-			answer as RTCSessionDescription
+			answer
 		);
 	}
 
@@ -957,7 +975,7 @@ export class Handler extends HandlerInterface {
 		await this.#channel.request(
 			'handler.setRemoteDescription',
 			this.#internal,
-			offer as RTCSessionDescription
+			offer
 		);
 
 		const answer = await this.#channel.request(
@@ -973,7 +991,7 @@ export class Handler extends HandlerInterface {
 		await this.#channel.request(
 			'handler.setLocalDescription',
 			this.#internal,
-			answer as RTCSessionDescription
+			answer
 		);
 	}
 
@@ -1014,7 +1032,7 @@ export class Handler extends HandlerInterface {
 		await this.#channel.request(
 			'handler.setRemoteDescription',
 			this.#internal,
-			offer as RTCSessionDescription
+			offer
 		);
 
 		const answer = await this.#channel.request(
@@ -1030,7 +1048,7 @@ export class Handler extends HandlerInterface {
 		await this.#channel.request(
 			'handler.setLocalDescription',
 			this.#internal,
-			answer as RTCSessionDescription
+			answer
 		);
 	}
 
@@ -1075,8 +1093,8 @@ export class Handler extends HandlerInterface {
 			negotiated: true,
 			id: streamId,
 			ordered,
-			maxPacketLifeTime: maxPacketLifeTime || null, // Important.
-			maxRetransmits: maxRetransmits || null, // Important.
+			maxPacketLifeTime: maxPacketLifeTime ?? null, // Important.
+			maxRetransmits: maxRetransmits ?? null, // Important.
 			label,
 			protocol,
 		};
@@ -1112,9 +1130,9 @@ export class Handler extends HandlerInterface {
 		// If this is the first DataChannel we need to create the SDP offer with
 		// m=application section.
 		if (!this.#hasDataChannelMediaSection) {
-			this.#remoteSdp!.receiveSctpAssociation();
+			this.#remoteSdp.receiveSctpAssociation();
 
-			const offer = { type: 'offer', sdp: this.#remoteSdp!.getSdp() };
+			const offer = { type: 'offer', sdp: this.#remoteSdp.getSdp() };
 
 			logger.debug(
 				'receiveDataChannel() | calling handler.setRemoteDescription() [offer:%o]',
@@ -1124,7 +1142,7 @@ export class Handler extends HandlerInterface {
 			await this.#channel.request(
 				'handler.setRemoteDescription',
 				this.#internal,
-				offer as RTCSessionDescription
+				offer
 			);
 
 			const answer = await this.#channel.request(
@@ -1146,14 +1164,12 @@ export class Handler extends HandlerInterface {
 			await this.#channel.request(
 				'handler.setLocalDescription',
 				this.#internal,
-				answer as RTCSessionDescription
+				answer
 			);
 
 			this.#hasDataChannelMediaSection = true;
 		}
 
-		// TODO: https://github.com/versatica/mediasoup-client-aiortc/issues/24
-		// @ts-ignore
 		return { dataChannel };
 	}
 
@@ -1162,7 +1178,7 @@ export class Handler extends HandlerInterface {
 		localSdpObject,
 	}: {
 		localDtlsRole: DtlsRole;
-		localSdpObject?: any;
+		localSdpObject?: SdpTransform.SessionDescription;
 	}): Promise<void> {
 		if (!localSdpObject) {
 			const offer = await this.#channel.request(
@@ -1182,7 +1198,7 @@ export class Handler extends HandlerInterface {
 		dtlsParameters.role = localDtlsRole;
 
 		// Update the remote DTLS role in the SDP.
-		this.#remoteSdp!.updateDtlsRole(
+		this.#remoteSdp.updateDtlsRole(
 			localDtlsRole === 'client' ? 'server' : 'client'
 		);
 
@@ -1211,6 +1227,7 @@ export class Handler extends HandlerInterface {
 	}
 
 	private handleWorkerNotifications(): void {
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
 		this.#channel.on(this.#internal.handlerId, (event: string, data?: any) => {
 			switch (event) {
 				case 'signalingstatechange': {
